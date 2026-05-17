@@ -1,5 +1,8 @@
 %YAML:1.0
 
+# ----------------------------------
+# native data copied from OpenVINS repository (not for OAK-D)
+# ----------------------------------
 # cam0:
 #   T_imu_cam: # rotation from camera to IMU R_CtoI, position of camera in IMU p_CinI
 #     - [0.0, 1.0, 0.0, 0.0]
@@ -27,7 +30,9 @@
 #   resolution: [640, 400]
 #   rostopic: /cam1/image_raw
 
+# ----------------------------------
 # acquired calib data by kalibr
+# ----------------------------------
 cam0:
   T_imu_cam:
     - [0.01120139, 0.99988601, -0.01012409, 0.00130197]
