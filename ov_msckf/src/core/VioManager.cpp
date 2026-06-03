@@ -24,7 +24,7 @@
 #include "feat/Feature.h"
 #include "feat/FeatureDatabase.h"
 #include "feat/FeatureInitializer.h"
-#include "track/TrackAruco.h"
+// #include "track/TrackAruco.h"
 #include "track/TrackDescriptor.h"
 #include "track/TrackKLT.h"
 #include "track/TrackSIM.h"
@@ -141,8 +141,8 @@ VioManager::VioManager(VioManagerOptions &params_) : thread_init_running(false),
 
   // Initialize our aruco tag extractor
   if (params.use_aruco) {
-    trackARUCO = std::shared_ptr<TrackBase>(new TrackAruco(state->_cam_intrinsics_cameras, state->_options.max_aruco_features,
-                                                           params.use_stereo, params.histogram_method, params.downsize_aruco));
+//    trackARUCO = std::shared_ptr<TrackBase>(new TrackAruco(state->_cam_intrinsics_cameras, state->_options.max_aruco_features,
+//                                                           params.use_stereo, params.histogram_method, params.downsize_aruco));
   }
 
   // Initialize our state propagator

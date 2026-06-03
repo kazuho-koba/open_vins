@@ -35,7 +35,7 @@ list(APPEND LIBRARY_SOURCES
         src/cpi/CpiV2.cpp
         src/sim/BsplineSE3.cpp
         src/track/TrackBase.cpp
-        src/track/TrackAruco.cpp
+        # src/track/TrackAruco.cpp
         src/track/TrackDescriptor.cpp
         src/track/TrackKLT.cpp
         src/track/TrackSIM.cpp
@@ -72,10 +72,10 @@ ament_export_libraries(ov_core_lib)
 #    target_link_libraries(test_tracking ov_core_lib ${thirdparty_libraries})
 #endif ()
 
-add_executable(test_webcam src/test_webcam.cpp)
-ament_target_dependencies(test_webcam rclcpp cv_bridge)
-target_link_libraries(test_webcam ov_core_lib ${thirdparty_libraries})
-install(TARGETS test_webcam DESTINATION lib/${PROJECT_NAME})
+# add_executable(test_webcam src/test_webcam.cpp)
+# ament_target_dependencies(test_webcam rclcpp cv_bridge)
+# target_link_libraries(test_webcam ov_core_lib ${thirdparty_libraries})
+# install(TARGETS test_webcam DESTINATION lib/${PROJECT_NAME})
 
 add_executable(test_profile src/test_profile.cpp)
 ament_target_dependencies(test_profile rclcpp cv_bridge)
