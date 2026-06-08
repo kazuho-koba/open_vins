@@ -45,7 +45,7 @@ cam0:
   distortion_model: radtan
   intrinsics: [400.4814123024703, 400.6352560522375, 322.33123328330237, 205.48166803116757]
   resolution: [640, 400]
-  rostopic: /cam0/image_raw
+  rostopic: /oak/stereo/left/image_raw
 cam1:
   T_imu_cam:
     - [0.00102972, 0.99998574, 0.00524095, -0.00201197]
@@ -58,4 +58,4 @@ cam1:
   distortion_model: radtan
   intrinsics: [399.087067623455, 399.12724497515325, 330.7662134787063, 201.01493203166558]
   resolution: [640, 400]
-  rostopic: /cam1/image_raw
+  rostopic: /oak/stereo/right/image_raw
