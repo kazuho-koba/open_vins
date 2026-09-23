@@ -84,7 +84,11 @@ grid_x: 5 # extraction sub-grid count for horizontal direction (uniform tracking
 grid_y: 5 # extraction sub-grid count for vertical direction (uniform tracking)
 min_px_dist: 10 # distance between features (features near each other provide less information)
 knn_ratio: 0.70 # descriptor knn threshold for the top two descriptor matches
-track_frequency: 20.0 # frequency we will perform feature tracking at (in frames per second / hertz)
+# Frontend admission ceiling, not an expected camera topic rate. ROS2Visualizer
+# drops frames closer than 1 / track_frequency to the prior accepted frame.
+# Raise only with an OAK/CPU/queue A/B test; it can reduce intentional thinning
+# but also increases frontend and backend load.
+track_frequency: 20.0 # feature tracking frequency [Hz]
 downsample_cameras: false # will downsample image in half if true
 num_opencv_threads: 2 # -1: auto, 0-1: serial, >1: number of threads
 histogram_method: "HISTOGRAM" # NONE, HISTOGRAM, CLAHE
@@ -113,7 +117,6 @@ use_mask: false
 # imu config should also have the correct noise values
 relative_config_imu: "kalibr_imu_chain.yaml"
 relative_config_imucam: "kalibr_imucam_chain_oakds2_19443010C10EF91200.yaml"
-
 
 
 

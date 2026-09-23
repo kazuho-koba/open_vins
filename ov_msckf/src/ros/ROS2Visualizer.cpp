@@ -497,7 +497,10 @@ void ROS2Visualizer::callback_inertial(const sensor_msgs::msg::Imu::SharedPtr ms
 
 void ROS2Visualizer::callback_monocular(const sensor_msgs::msg::Image::SharedPtr msg0, int cam_id0) {
 
-  // Check if we should drop this image
+  // Admission throttle for frontend tracking. track_frequency is a maximum
+  // processing rate, not a promise that every ROS image callback is used.
+  // It intentionally compares ROS header timestamps so replay and live runs
+  // make the same drop decision for the same sensor data.
   double timestamp = msg0->header.stamp.sec + msg0->header.stamp.nanosec * 1e-9;
   double time_delta = 1.0 / _app->get_params().track_frequency;
   if (camera_last_timestamp.find(cam_id0) != camera_last_timestamp.end() && timestamp < camera_last_timestamp.at(cam_id0) + time_delta) {
@@ -537,7 +540,10 @@ void ROS2Visualizer::callback_monocular(const sensor_msgs::msg::Image::SharedPtr
 void ROS2Visualizer::callback_stereo(const sensor_msgs::msg::Image::ConstSharedPtr msg0, const sensor_msgs::msg::Image::ConstSharedPtr msg1,
                                      int cam_id0, int cam_id1) {
 
-  // Check if we should drop this image
+  // Keep the stereo pair atomic: decide from the left-image timestamp before
+  // converting either side. Dropping only one side would turn a synchronized
+  // stereo observation into a misleading monocular update.
+  // track_frequency is the frontend admission ceiling, not camera input Hz.
   double timestamp = msg0->header.stamp.sec + msg0->header.stamp.nanosec * 1e-9;
   double time_delta = 1.0 / _app->get_params().track_frequency;
   if (camera_last_timestamp.find(cam_id0) != camera_last_timestamp.end() && timestamp < camera_last_timestamp.at(cam_id0) + time_delta) {
