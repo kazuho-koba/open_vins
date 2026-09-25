@@ -497,10 +497,9 @@ void ROS2Visualizer::callback_inertial(const sensor_msgs::msg::Imu::SharedPtr ms
 
 void ROS2Visualizer::callback_monocular(const sensor_msgs::msg::Image::SharedPtr msg0, int cam_id0) {
 
-  // Admission throttle for frontend tracking. track_frequency is a maximum
-  // processing rate, not a promise that every ROS image callback is used.
-  // It intentionally compares ROS header timestamps so replay and live runs
-  // make the same drop decision for the same sensor data.
+  // frontend追跡への投入を制限する。track_frequencyは最大処理周波数であり、全ROS画像
+  // callbackを使うという意味ではない。ROS header timestampを比較するため、同じsensor
+  // dataなら再生とliveで同じ間引き判定になる。
   double timestamp = msg0->header.stamp.sec + msg0->header.stamp.nanosec * 1e-9;
   double time_delta = 1.0 / _app->get_params().track_frequency;
   if (camera_last_timestamp.find(cam_id0) != camera_last_timestamp.end() && timestamp < camera_last_timestamp.at(cam_id0) + time_delta) {
@@ -540,10 +539,9 @@ void ROS2Visualizer::callback_monocular(const sensor_msgs::msg::Image::SharedPtr
 void ROS2Visualizer::callback_stereo(const sensor_msgs::msg::Image::ConstSharedPtr msg0, const sensor_msgs::msg::Image::ConstSharedPtr msg1,
                                      int cam_id0, int cam_id1) {
 
-  // Keep the stereo pair atomic: decide from the left-image timestamp before
-  // converting either side. Dropping only one side would turn a synchronized
-  // stereo observation into a misleading monocular update.
-  // track_frequency is the frontend admission ceiling, not camera input Hz.
+  // stereo pairを一体として扱う。どちらも変換する前にleft画像timestampで判定する。
+  // 片側だけを捨てると、同期stereo観測を誤ったmonocular更新へ変えてしまう。
+  // track_frequencyはcamera入力Hzではなくfrontendへの投入上限である。
   double timestamp = msg0->header.stamp.sec + msg0->header.stamp.nanosec * 1e-9;
   double time_delta = 1.0 / _app->get_params().track_frequency;
   if (camera_last_timestamp.find(cam_id0) != camera_last_timestamp.end() && timestamp < camera_last_timestamp.at(cam_id0) + time_delta) {
