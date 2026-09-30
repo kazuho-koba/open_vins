@@ -95,7 +95,8 @@ public:
    */
   void initialize_with_gt(Eigen::Matrix<double, 17, 1> imustate);
 
-  /// If we are initialized or not
+  /// 初期化と少なくとも1回の状態更新（特徴更新または成功したZUPT）が完了したか。
+  /// 停止中のZUPT状態も出力可能にするが、特徴の三角測量完了は保証しない。
   bool initialized() { return is_initialized_vio && timelastupdate != -1; }
 
   /// Timestamp that the system was initialized at
@@ -215,7 +216,8 @@ protected:
   std::ofstream of_statistics;
   boost::posix_time::ptime rT1, rT2, rT3, rT4, rT5, rT6, rT7;
 
-  // Track how much distance we have traveled
+  // 最後の有効な状態更新時刻[s]。通常の特徴更新とZUPT更新で進める。
+  // 移動距離は対応するcloneが存在する場合にだけ加算する（停止中のZUPTにはcloneなし）。
   double timelastupdate = -1;
   double distance = 0;
 

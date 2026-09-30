@@ -5,9 +5,32 @@ upstreamのOpenVINS一般説明は[ReadMe.md](ReadMe.md)を参照してくださ
 
 ## 使用設定
 
-Patasmonkey launchは`config/oakd_s2/estimator_config1.yaml`を使います。camera–IMU
+Patasmonkey launchは`pm_config/config/oak_d_s2/estimator_config1.yaml`を使います。camera–IMU
 校正は、接続したOAKのMX IDに対応するYAMLを`pm_config`から指定します。別個体の
 校正値を流用すると、VIOのscale・姿勢・初期化安定性を損なうため避けてください。
+
+## 停止中の静的初期化＋起動時ZUPT
+
+Patasmonkey側の上記YAMLでは`try_zupt: true`と`zupt_only_at_beginning: true`で、
+jerkを加えず停止中に初期化できる。画像とIMUを約3秒以上取得し、視差と
+加速度変動の静止判定が通るまで車体を停止させる。従来のjerk待ちへ戻す場合は
+`try_zupt: false`にする。`init_dyn_use: false`と正の`init_imu_thresh`は維持する。
+OpenVINS内の`config/oakd_s2/`コピーではなく、実際に渡した`config_path`を確認する。
+
+ZUPTが成功したときにも`timelastupdate`を進め、初期化済みの静止状態をROS出力の
+対象にする。upstreamでは通常の特徴更新前に`initialized()`がfalseのままとなり、
+停止中の初期化成功ログが出てもpose/odometry/native stateが公開されなかった。
+本変更はZUPTの推定式や受入れ条件を変えず、成功した状態更新の公開を可能にする。
+実画像入力とsimulation入力の両方で同じ扱いにする。
+
+停止中のpose/pathはZUPT更新、`odomimu`はIMU時刻への短時間予測から生成される。
+この段階では通常の特徴更新がなく、特徴点群は空でも正常である。
+`timing.txt`は通常の特徴更新を計測するため、ZUPTだけの区間には行が増えない。
+初期yawは任意の基準であり、停止初期化は地球基準headingを与えない。
+
+`zupt_only_at_beginning`の解除状態は`has_moved_since_zupt`で管理する。
+ZUPTの公開開始ではこの値を変更せず、通常のVIO処理へ移行した後のZUPT再投入を
+既存ロジックで抑止する。静止判定が誤ると低速移動を抑制し得るため、起動時は停止する。
 
 ## `track_frequency`の意味
 
@@ -44,7 +67,8 @@ OpenVINS出力を直接global poseとして扱いません。Patasmonkey側のVI
 ## 検証手順
 
 1. OAK-DのMX IDとUSB 3.x接続を`depthai_driver`の診断で確認する。
-2. 停止状態でOpenVINSを起動し、初期化に必要な車体運動を安全に与える。
+2. 停止状態でOpenVINSを起動し、初期化成功と出力開始を確認する。jerk待ち設定を
+   選んだ場合だけ、静止区間を確保してから初期化に必要なセンサ運動を与える。
 3. bagの画像・IMU・`trackhist`・OAK診断・OpenVINS native logを同一時刻で比較する。
 4. VIO速度/高さゲートの診断を確認し、隔離の契機を記録する。
 
