@@ -44,6 +44,20 @@ ZUPTの公開開始ではこの値を変更せず、通常のVIO処理へ移行�
 
 ## 記録する情報
 
+### IMU積分区間の異常診断
+
+`propagate_and_clone`の積分時間チェックが失敗する場合、consoleに
+`[PROP_INTERVAL]`を出力する。`time0/time1`はIMU時刻系の要求端点（秒）、
+`dt_summed`は実際に選択した隣接IMU区間の合計である。
+`buffer_*`は選択時点の元buffer、`selected_*`は補間・外挿後の区間を示す。
+件数0の端点0は欠測を表す便宜値であり、実測時刻ではない。
+異常時の `[PROP_CLEAN_REQUEST]` は直近64回のbuffer削除要求である。
+`source` は通常IMU投入、camera ZUPT、simulation ZUPTを区別し、
+`threshold` 未満の時刻を削除対象とする。実際の削除件数を表すものではなく、
+64回より古い要求は残らない。正常時は履歴をメモリ保持するだけで出力しない。
+`offset_old/new`とcamera/state時刻も同時に記録し、開始不足・終了不足・
+時間補正変化を切り分ける。正常時には出力せず、既存assertionは維持する。
+
 `pm_bag_global_localization.launch.py`は通常のOpenVINS出力に加え、以下を同一試行の
 bagディレクトリ`openvins/`へ保存します。
 
@@ -65,6 +79,16 @@ OpenVINS出力を直接global poseとして扱いません。Patasmonkey側のVI
 安全策です。
 
 ## 検証手順
+
+### IMU bufferの並行アクセス
+
+PropagatorとZUPT updaterは、IMU callbackによる追加と画像更新threadによる
+削除・区間抽出を同じmutexで保護します。public cleanerは自身でロックを取得し、
+ロック済みのfeedは内部helperを使って二重ロックを避けます。必要なIMU区間を
+別vectorへ取り出した後はロックを解放し、EKF計算中のIMU受信を妨げません。
+保持時間、ZUPT判定閾値、積分assertionは変更していません。並行アクセスの
+修正だけで入力欠測や過剰な履歴削除が解決するとは限らないため、異常時の
+区間診断と実機再検証は引き続き必要です。
 
 1. OAK-DのMX IDとUSB 3.x接続を`depthai_driver`の診断で確認する。
 2. 停止状態でOpenVINSを起動し、初期化成功と出力開始を確認する。jerk待ち設定を

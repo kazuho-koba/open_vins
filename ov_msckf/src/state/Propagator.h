@@ -70,16 +70,34 @@ public:
 
     // Clean old measurements
     // std::cout << "PROP: imu_data.size() " << imu_data.size() << std::endl;
-    clean_old_imu_measurements(oldest_time - 0.10);
+    clean_old_imu_measurements_locked(oldest_time - 0.10, "feed_imu");
   }
 
   /**
    * @brief This will remove any IMU measurements that are older then the given measurement time
    * @param oldest_time Time that we can discard measurements before (in IMU clock)
    */
-  void clean_old_imu_measurements(double oldest_time) {
+  void clean_old_imu_measurements(double oldest_time, const char *source = "external") {
+    // ZUPT側からの削除も追加・区間選択と同じmutexで保護する。
+    // feed_imuは既にロック済みなので、内部helperを直接呼び二重ロックを避ける。
+    std::lock_guard<std::mutex> lock(imu_data_mtx);
+    clean_old_imu_measurements_locked(oldest_time, source);
+  }
+
+private:
+  // 呼出元がimu_data_mtxを保持すること。閾値・保持期間は従来と同じ。
+  void clean_old_imu_measurements_locked(double oldest_time, const char *source) {
     if (oldest_time < 0)
       return;
+    // 削除経路と閾値（IMU時刻の秒）だけを独立mutexで履歴化する。
+    // 正常時のconsole出力を避ける。ロック順序はIMU→診断履歴に統一する。
+    // sourceは呼出元の文字列literalのみ。所有期間はプロセス全体である。
+    {
+      std::lock_guard<std::mutex> diagnostic_lock(cleanup_history_mtx);
+      if (cleanup_history.size() == 64)
+        cleanup_history.erase(cleanup_history.begin());
+      cleanup_history.emplace_back(oldest_time, source);
+    }
     auto it0 = imu_data.begin();
     while (it0 != imu_data.end()) {
       if (it0->timestamp < oldest_time) {
@@ -90,6 +108,7 @@ public:
     }
   }
 
+public:
   /**
    * @brief Will invalidate the cache used for fast propagation
    */
@@ -437,6 +456,9 @@ protected:
   /// Our history of IMU messages (time, angular, linear)
   std::vector<ov_core::ImuData> imu_data;
   std::mutex imu_data_mtx;
+  // 直近64回の削除要求を保持する。実際の削除件数ではなく要求履歴である。
+  std::mutex cleanup_history_mtx;
+  std::vector<std::pair<double, const char *>> cleanup_history;
 
   /// Gravity vector
   Eigen::Vector3d _gravity;

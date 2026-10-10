@@ -65,7 +65,12 @@ UpdaterZeroVelocity::UpdaterZeroVelocity(UpdaterOptions &options, NoiseManager &
 bool UpdaterZeroVelocity::try_update(std::shared_ptr<State> state, double timestamp) {
 
   // Return if we don't have any imu data yet
-  if (imu_data.empty()) {
+  bool buffer_empty;
+  {
+    std::lock_guard<std::mutex> lock(imu_data_mtx);
+    buffer_empty = imu_data.empty();
+  }
+  if (buffer_empty) {
     last_zupt_state_timestamp = 0.0;
     return false;
   }
@@ -94,7 +99,13 @@ bool UpdaterZeroVelocity::try_update(std::shared_ptr<State> state, double timest
   double time1 = timestamp + t_off_new;
 
   // Select bounding inertial measurements
-  std::vector<ov_core::ImuData> imu_recent = Propagator::select_imu_readings(imu_data, time0, time1);
+  std::vector<ov_core::ImuData> imu_recent;
+  {
+    // 必要区間を所有するvectorへ抽出したら解放する。
+    // 後段のEKF計算中までロックを保持してIMU受信を止めない。
+    std::lock_guard<std::mutex> lock(imu_data_mtx);
+    imu_recent = Propagator::select_imu_readings(imu_data, time0, time1);
+  }
 
   // Move forward in time
   last_prop_time_offset = t_off_new;

@@ -20,6 +20,7 @@
  */
 
 #include "Propagator.h"
+#include <cstdio>
 
 #include "state/State.h"
 #include "state/StateHelper.h"
@@ -63,8 +64,17 @@ void Propagator::propagate_and_clone(std::shared_ptr<State> state, double timest
   double time0 = state->_timestamp + last_prop_time_offset;
   double time1 = timestamp + t_off_new;
   std::vector<ov_core::ImuData> prop_data;
+  // 選択と同じmutex区間でbuffer端点を保存する。後続IMU投入による変化と
+  // 積分区間不足を混同しないため、異常時にも選択時点の値を報告する。
+  size_t buffer_count = 0;
+  double buffer_first = 0.0, buffer_last = 0.0;
   {
     std::lock_guard<std::mutex> lck(imu_data_mtx);
+    buffer_count = imu_data.size();
+    if (!imu_data.empty()) {
+      buffer_first = imu_data.front().timestamp;
+      buffer_last = imu_data.back().timestamp;
+    }
     prop_data = Propagator::select_imu_readings(imu_data, time0, time1);
   }
 
@@ -97,6 +107,26 @@ void Propagator::propagate_and_clone(std::shared_ptr<State> state, double timest
       Qd_summed = 0.5 * (Qd_summed + Qd_summed.transpose());
       dt_summed += prop_data.at(i + 1).timestamp - prop_data.at(i).timestamp;
     }
+  }
+  // 秒単位の区間不一致だけを記録し、正常時のログ負荷は増やさない。
+  // assertionは維持する。不完全な積分結果を正常出力として継続させない。
+  if (!(std::abs((time1 - time0) - dt_summed) < 1e-4)) {
+    PRINT_ERROR("[PROP_INTERVAL] state=%.9f camera=%.9f offset_old=%.9f offset_new=%.9f "
+                "time0=%.9f time1=%.9f dt_summed=%.9f buffer_count=%zu buffer_first=%.9f buffer_last=%.9f "
+                "selected_count=%zu selected_first=%.9f selected_last=%.9f\n",
+                state->_timestamp, timestamp, last_prop_time_offset, t_off_new, time0, time1, dt_summed,
+                buffer_count, buffer_first, buffer_last, prop_data.size(),
+                prop_data.empty() ? 0.0 : prop_data.front().timestamp,
+                prop_data.empty() ? 0.0 : prop_data.back().timestamp);
+    // 削除要求の履歴を同時に出し、どの閾値が要求積分区間を越えたか照合する。
+    {
+      std::lock_guard<std::mutex> diagnostic_lock(cleanup_history_mtx);
+      for (const auto &request : cleanup_history) {
+        PRINT_ERROR("[PROP_CLEAN_REQUEST] source=%s threshold=%.9f\n", request.second, request.first);
+      }
+    }
+    // pipe経由のconsole保存ではabortがstdio bufferを捨てるため、異常行を確定する。
+    std::fflush(stdout);
   }
   assert(std::abs((time1 - time0) - dt_summed) < 1e-4);
 

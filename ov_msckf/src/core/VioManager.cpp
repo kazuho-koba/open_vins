@@ -228,7 +228,7 @@ void VioManager::feed_measurement_simulation(double timestamp, const std::vector
       // ZUPTで時刻と共分散が更新された静止状態も、ROSへ公開可能な推定結果とする。
       // 通常の特徴更新だけを待つと、jerkなし初期化に成功しても停止中は出力されない。
       timelastupdate = timestamp;
-      propagator->clean_old_imu_measurements(timestamp + state->_calib_dt_CAMtoIMU->value()(0) - 0.10);
+      propagator->clean_old_imu_measurements(timestamp + state->_calib_dt_CAMtoIMU->value()(0) - 0.10, "zupt_simulation");
       updaterZUPT->clean_old_imu_measurements(timestamp + state->_calib_dt_CAMtoIMU->value()(0) - 0.10);
       propagator->invalidate_cache();
       return;
@@ -305,7 +305,7 @@ void VioManager::track_image_and_update(const ov_core::CameraData &message_const
       // 公開可能にする。移動開始や特徴の三角測量が完了したことは意味しない。
       // 移動後のZUPT抑止はhas_moved_since_zuptで別に管理し、ここでは変更しない。
       timelastupdate = message.timestamp;
-      propagator->clean_old_imu_measurements(message.timestamp + state->_calib_dt_CAMtoIMU->value()(0) - 0.10);
+      propagator->clean_old_imu_measurements(message.timestamp + state->_calib_dt_CAMtoIMU->value()(0) - 0.10, "zupt_camera");
       updaterZUPT->clean_old_imu_measurements(message.timestamp + state->_calib_dt_CAMtoIMU->value()(0) - 0.10);
       propagator->invalidate_cache();
       return;

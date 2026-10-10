@@ -23,6 +23,7 @@
 #define OV_MSCKF_UPDATER_ZEROVELOCITY_H
 
 #include <memory>
+#include <mutex>
 
 #include "utils/sensor_data.h"
 
@@ -76,7 +77,8 @@ public:
    */
   void feed_imu(const ov_core::ImuData &message, double oldest_time = -1) {
 
-    // Append it to our vector
+    // IMU callbackと画像更新threadが共有するため、追加と削除を一括で保護する。
+    std::lock_guard<std::mutex> lock(imu_data_mtx);
     imu_data.emplace_back(message);
 
     // Sort our imu data (handles any out of order measurements)
@@ -86,7 +88,7 @@ public:
 
     // Clean old measurements
     // std::cout << "ZVUPT: imu_data.size() " << imu_data.size() << std::endl;
-    clean_old_imu_measurements(oldest_time - 0.10);
+    clean_old_imu_measurements_locked(oldest_time - 0.10);
   }
 
   /**
@@ -94,6 +96,13 @@ public:
    * @param oldest_time Time that we can discard measurements before (in IMU clock)
    */
   void clean_old_imu_measurements(double oldest_time) {
+    std::lock_guard<std::mutex> lock(imu_data_mtx);
+    clean_old_imu_measurements_locked(oldest_time);
+  }
+
+private:
+  // ロック済みのfeed_imuからも利用する。時刻はIMU clockの秒。
+  void clean_old_imu_measurements_locked(double oldest_time) {
     if (oldest_time < 0)
       return;
     auto it0 = imu_data.begin();
@@ -106,6 +115,7 @@ public:
     }
   }
 
+public:
   /**
    * @brief Will first detect if the system is zero velocity, then will update.
    * @param state State of the filter
@@ -144,6 +154,8 @@ protected:
 
   /// Our history of IMU messages (time, angular, linear)
   std::vector<ov_core::ImuData> imu_data;
+  // 追加・削除・区間抽出の全経路で使用し、vectorの再配置中の参照を防ぐ。
+  std::mutex imu_data_mtx;
 
   /// Estimate for time offset at last propagation time
   double last_prop_time_offset = 0.0;
