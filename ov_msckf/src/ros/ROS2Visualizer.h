@@ -46,6 +46,7 @@
 #include <tf2_ros/transform_broadcaster.h>
 
 #include <atomic>
+#include <chrono>
 #include <fstream>
 #include <memory>
 #include <mutex>
@@ -157,6 +158,14 @@ protected:
 
   // Our subscribers and camera synchronizers
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu;
+  // 購読直後の欠測を推定器内の削除と区別する。通常は診断OFF、前回stampは秒単位。
+  bool imu_input_diagnostics = false;
+  double previous_imu_input_stamp = -1.0;
+  // 排他callback group内だけで更新する。steady_clockで実経過時間を測り、
+  // ROS時計補正の影響を避ける。直前の処理時間の単位はms。
+  std::chrono::steady_clock::time_point previous_imu_callback_start;
+  double previous_imu_feed_ms = 0.0;
+  double previous_imu_odometry_ms = 0.0;
   std::vector<rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr> subs_cam;
   typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::Image, sensor_msgs::msg::Image> sync_pol;
   std::vector<std::shared_ptr<message_filters::Synchronizer<sync_pol>>> sync_cam;

@@ -20,6 +20,7 @@
  */
 
 #include "Propagator.h"
+#include "ImuIntervalCheck.h"
 #include <cstdio>
 
 #include "state/State.h"
@@ -76,6 +77,34 @@ void Propagator::propagate_and_clone(std::shared_ptr<State> state, double timest
       buffer_last = imu_data.back().timestamp;
     }
     prop_data = Propagator::select_imu_readings(imu_data, time0, time1);
+  }
+
+  // 欠測で開始側のIMUが消えた区間は、積分・共分散更新・clone追加の前に見送る。
+  // assertを無効化して不完全な推定を公開するのではなく、状態時刻を進めず呼出元へ戻す。
+  // 後続データでも端点が揃わない場合は推定を再開できず、別途再初期化が必要になる。
+  if (!has_complete_imu_interval(prop_data, time0, time1)) {
+    PRINT_WARNING("[PROP_IMU_INTERVAL_REJECT] time0=%.9f time1=%.9f count=%zu first=%.9f last=%.9f\n",
+                  time0, time1, prop_data.size(), prop_data.empty() ? 0.0 : prop_data.front().timestamp,
+                  prop_data.empty() ? 0.0 : prop_data.back().timestamp);
+    // buffer先頭まで要求開始時刻を越えていれば、今後の新規IMUでは復元できない。
+    // 受信と画像更新を止めるラッチを立て、停止状態のままbufferを無限に蓄積させない。
+    // 自動リセットは相対座標の飛びを伴うため、ここでは明示的な再起動を要求する。
+    if (buffer_count > 0 && buffer_first > time0 + 1e-6) {
+      imu_interval_reset_required_.store(true);
+      PRINT_ERROR("[VIO_IMU_RESET_REQUIRED] required_start=%.9f buffer_first=%.9f; restart VIO before reuse\n",
+                  time0, buffer_first);
+      // 非復帰判定が出た1回だけ、選択時の実buffer端点と既存の削除要求履歴を残す。
+      // 入力未到達とclean_oldによる削除を区別する。保持期間・積分・停止条件は変えない。
+      PRINT_ERROR("[VIO_IMU_RESET_BUFFER] count=%zu first=%.9f last=%.9f\n",
+                  buffer_count, buffer_first, buffer_last);
+      {
+        std::lock_guard<std::mutex> diagnostic_lock(cleanup_history_mtx);
+        for (const auto &request : cleanup_history)
+          PRINT_ERROR("[VIO_IMU_RESET_CLEAN] source=%s threshold=%.9f\n", request.second, request.first);
+      }
+      std::fflush(stdout);
+    }
+    return;
   }
 
   // We are going to sum up all the state transition matrices, so we can do a single large multiplication at the end
@@ -170,6 +199,10 @@ void Propagator::propagate_and_clone(std::shared_ptr<State> state, double timest
 bool Propagator::fast_state_propagate(std::shared_ptr<State> state, double timestamp, Eigen::Matrix<double, 13, 1> &state_plus,
                                       Eigen::Matrix<double, 12, 12> &covariance) {
 
+  // 復元不能な画像更新失敗後は、新しい時刻の高レートodomで正常性を装わない。
+  if (imu_interval_reset_required())
+    return false;
+
   // First we will store the current calibration / estimates of the state
   if (!cache_imu_valid) {
     cache_state_time = state->_timestamp;
@@ -187,7 +220,9 @@ bool Propagator::fast_state_propagate(std::shared_ptr<State> state, double times
     std::lock_guard<std::mutex> lck(imu_data_mtx);
     prop_data = Propagator::select_imu_readings(imu_data, time0, time1, false);
   }
-  if (prop_data.size() < 2)
+  // 高レートodom側も同じ端点検査を行う。画像更新を見送ったのに、開始端点がない
+  // 短いIMU系列だけで新しいtimestampのodomを公開すると、下流の鮮度検査を欺く。
+  if (!has_complete_imu_interval(prop_data, time0, time1))
     return false;
 
   // Biases

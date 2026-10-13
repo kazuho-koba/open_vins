@@ -96,6 +96,90 @@ PropagatorとZUPT updaterは、IMU callbackによる追加と画像更新thread�
 3. bagの画像・IMU・`trackhist`・OAK診断・OpenVINS native logを同一時刻で比較する。
 4. VIO速度/高さゲートの診断を確認し、隔離の契機を記録する。
 
+### IMU受信履歴の比較診断
+
+非同期画像更新threadに渡すIMU到達時刻は値キャプチャします。callbackのローカル
+`message`を参照キャプチャすると、detach後に破棄済みの変数へアクセスし得ます。
+この修正は変数寿命の不具合を除きますが、DDS欠測や長い欠測区間の伝播問題を
+解消するものではありません。購読QoS・画像間引き・EKF設定は変更しません。
+
+画像queueのmutexは観測の検査・取り出しだけに使用し、VIO更新・可視化中は
+解放します。観測のcv::Matは取り出したローカル変数が所有します。camera更新は
+既存の単一更新threadで直列処理し、画像callbackのqueue投入待ちによってIMU受信
+callbackまで止まることを避けます。queue容量や欠測区間の補間規則は変えません。
+
+`subscribe.launch.py`の`imu_history_depth`は既定5件です。125 Hzでは約40 ms分の
+履歴に相当するため、batch配送・callback遅延の検証時は64件（約512 ms）との
+比較ができます。これは約254 msのpublish待ち実測値の約2倍を確保する試験値であり、
+欠測の解消を保証する値ではありません。BEST_EFFORTは維持し、画像QoSは変更しません。
+
+`imu_input_diagnostics:=true`では、受信callbackでheader stamp間隔が40 ms超または
+逆行した場合だけ`[IMU_INPUT_GAP]`を出力します。`receipt`はROS時刻、他の値は
+header時刻の秒単位です。bagの同区間と比較し、publisher側の欠測と購読側の欠測を
+区別してください。これは全受信履歴ではなく、40 ms以下の欠測は検出しません。
+同じ診断ON時には、画像callbackのcamera queue mutex待ちが40 msを超えると
+`[CAMERA_QUEUE_WAIT]`を出力します。待ち時間はsteady clockで測ったms、stampは
+画像headerの秒です。重い画像更新による受信callback停滞の切り分けに使います。
+深さは1〜1024件に制限し、既定挙動は変更していません。
+
 VIOリセット後の自動再利用は、Patasmonkey側の速度ゲートが一定期間の数値的健全性を
 確認してから行います。これは意味論的な正常性まで保証しないため、画像特徴とnative
 state logを必ず併用して評価してください。
+
+### 欠測区間の更新前検査
+
+ZUPTと通常propagationは、抽出IMU系列の先頭・末尾が要求区間の両端に一致し、
+時刻が有限かつ単調増加することを`ImuIntervalCheck.h`で検査します。
+許容差は1 usで、秒単位の丸め誤差用です。開始端点が欠けた系列をZUPTが受理して
+状態時刻を進めると、cleanupが後続propagationに必要なIMUまで削除してしまうため、
+不完全な区間は状態・共分散・cloneを変更する前に見送ります。
+ZUPTのcamera–IMU offsetも、受理できた更新に対応する値だけを確定します。
+
+見送り時は`[ZUPT_IMU_INTERVAL_REJECT]`／`[PROP_IMU_INTERVAL_REJECT]`を記録します。
+これは欠測の修復・自動リセットではなく、不完全な積分によるabortや誤更新を避ける
+保護です。一時的な端点不足では推定を見送ります。保持bufferの先頭まで要求開始時刻を
+越えた復元不能な場合は`[VIO_IMU_RESET_REQUIRED]`を出し、非復帰ラッチを立てます。
+以後の画像更新・IMU蓄積・高レートodom公開を停止し、停止中のbuffer肥大化や
+古い状態に新しいtimestampだけを付ける出力を防ぎます。ノードの再起動・再初期化が
+必要であり、自動リセットは実装していません。下流はVIO出力の鮮度で隔離してください。
+端点間の長い欠測・既存の補間／外挿の妥当性は別途検証が必要です。
+積分後の既存assertionは残しています。
+
+端点欠落・逆順・NaN・実ログの失敗時刻を含む単体試験は、repository rootで次のように
+実行できます。これはROS不要の純C++試験で、ROSパッケージのbuildはFoxy環境で行います。
+
+```bash
+g++ -std=c++14 -Wall -Wextra -pedantic -Iov_msckf/src \
+  ov_msckf/src/test/test_imu_interval_check.cpp -o /tmp/imu_interval_test
+/tmp/imu_interval_test
+```
+
+## VIO非復帰停止時の追加診断
+
+`VIO_IMU_RESET_REQUIRED`が出た場合だけ、`VIO_IMU_RESET_BUFFER`に区間選択時の
+実IMU buffer件数・先頭/末尾時刻[秒]を残し、`VIO_IMU_RESET_CLEAN`に既存の
+有界履歴（最大64件）の削除要求元と閾値を出します。入力未到達と過去データ削除を
+切り分ける目的です。正常時のログ量、buffer保持期間、積分方法、安全停止条件は変更しません。
+プロセス生存やZUPT logだけで健全性を判断せず、odomimuの継続出力も確認してください。
+
+`imu_input_diagnostics:=true`では欠測時の`IMU_GAP_CONTEXT`にcallback開始間隔と
+直前のIMU feed／高レートodometry処理時間[ms]も残します。
+headerが連続でもcallback開始間隔が40 msを超えた場合は`IMU_CALLBACK_DELAY`を
+出し、購読履歴で吸収された受信停滞も確認できます。
+`VIO_IMU_CALLBACK_SLOW`はその処理が20 msを超えた場合、`VIO_CALLBACK_SLOW`は
+画像callback全体が20 msを超えた場合だけ出ます。変換・コピー・mask生成などを含み、
+queue待ちだけでは捉えられない停滞を調べます。
+steady_clockのwall時間であり、CPU実行時間やDDS内部受信時刻ではありません。
+callbackに入る前の待ちやOSによる停止も別に検証する必要があります。
+診断OFFでは新しい時計計測・ログは無効です。購読数、QoS、callback並列性、
+積分方法と欠測時の安全停止条件は変更しません。
+
+## 空のcamera queueでは更新threadを作らない
+
+IMU callbackはfeedと高レートodometry公開の後、camera queueとworker起動flagを
+同じmutexで確認する。画像がなければ戻り、画像がある場合だけ更新threadを起動する。
+IMU全件の蓄積・odom公開を間引く変更ではない。後からqueueに入った画像は次のIMU
+callbackで従来の到達時刻検査を通して処理する。既存workerのcamera更新は引き続き直列。
+画像到着直後に空workerが偶然拾う動作はなくなるが、入力headerや更新時刻規約は維持する。
+画像より高周波のIMUごとに空threadを作る無駄を減らす改修であり、DDSの欠測・OS待ちを
+根治する保証ではない。callback groupやQoSは変更しない。

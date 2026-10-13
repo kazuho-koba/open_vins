@@ -165,6 +165,11 @@ VioManager::VioManager(VioManagerOptions &params_) : thread_init_running(false),
 
 void VioManager::feed_measurement_imu(const ov_core::ImuData &message) {
 
+  // 復元不能な端点欠落後は推定を再開せず、ZUPT/propagation bufferも増やさない。
+  // ROSノードは正常停止できる状態で残し、下流は出力の鮮度低下を検出できるようにする。
+  if (propagator->imu_interval_reset_required())
+    return;
+
   // The oldest time we need IMU with is the last clone
   // We shouldn't really need the whole window, but if we go backwards in time we will
   double oldest_time = state->margtimestep();
@@ -190,6 +195,9 @@ void VioManager::feed_measurement_imu(const ov_core::ImuData &message) {
 
 void VioManager::feed_measurement_simulation(double timestamp, const std::vector<int> &camids,
                                              const std::vector<std::vector<std::pair<size_t, Eigen::VectorXf>>> &feats) {
+
+  if (propagator->imu_interval_reset_required())
+    return;
 
   // Start timing
   rT1 = boost::posix_time::microsec_clock::local_time();
@@ -257,6 +265,10 @@ void VioManager::feed_measurement_simulation(double timestamp, const std::vector
 }
 
 void VioManager::track_image_and_update(const ov_core::CameraData &message_const) {
+
+  // 停止中の特徴履歴を追加し続けない。復帰は新しいVioManagerでの初期化に限定する。
+  if (propagator->imu_interval_reset_required())
+    return;
 
   // Start timing
   rT1 = boost::posix_time::microsec_clock::local_time();

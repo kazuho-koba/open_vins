@@ -20,6 +20,8 @@
  */
 
 #include "ROS2Visualizer.h"
+#include <stdexcept>
+#include <chrono>
 
 #include "core/VioManager.h"
 #include "ros/ROSVisualizerHelper.h"
@@ -34,6 +36,31 @@
 using namespace ov_core;
 using namespace ov_type;
 using namespace ov_msckf;
+
+namespace {
+// 診断ON時だけ時計を読む。早期returnも含む画像callback全体を測り、
+// 20 ms超だけ警告する。新しい購読・ファイル・常時サンプルログは作らない。
+class CallbackWallTimer {
+public:
+  CallbackWallTimer(bool enabled, const char *kind, double stamp)
+      : enabled_(enabled), kind_(kind), stamp_(stamp) {
+    if (enabled_)
+      start_ = std::chrono::steady_clock::now();
+  }
+  ~CallbackWallTimer() {
+    if (!enabled_)
+      return;
+    const double elapsed_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_).count();
+    if (elapsed_ms > 20.0)
+      PRINT_WARNING("[VIO_CALLBACK_SLOW] kind=%s wall_ms=%.3f stamp=%.9f\n", kind_, elapsed_ms, stamp_);
+  }
+private:
+  bool enabled_;
+  const char *kind_;
+  double stamp_;
+  std::chrono::steady_clock::time_point start_;
+};
+} // namespace
 
 ROS2Visualizer::ROS2Visualizer(std::shared_ptr<rclcpp::Node> node, std::shared_ptr<VioManager> app, std::shared_ptr<Simulator> sim)
     : _node(node), _app(app), _sim(sim), thread_update_running(false) {
@@ -170,7 +197,20 @@ void ROS2Visualizer::setup_subscribers(std::shared_ptr<ov_core::YamlParser> pars
   _node->declare_parameter<std::string>("topic_imu", "/imu0");
   _node->get_parameter("topic_imu", topic_imu);
   parser->parse_external("relative_config_imu", "imu0", "rostopic", topic_imu);
-  sub_imu = _node->create_subscription<sensor_msgs::msg::Imu>(topic_imu, rclcpp::SensorDataQoS(),
+  // 履歴5件は125 Hzで約40 ms分。batch配送時の欠測を検証するため深さだけを変更可能にする。
+  // RELIABLEへの変更はpublisherの待ちを増やし得るので、BEST_EFFORTは維持する。
+  // launch overrideはnode生成時に自動宣言される。二重宣言を避け、未指定時だけ既定を宣言。
+  if (!_node->has_parameter("imu_history_depth"))
+    _node->declare_parameter<int>("imu_history_depth", 5);
+  const int imu_history_depth = static_cast<int>(_node->get_parameter("imu_history_depth").as_int());
+  if (imu_history_depth < 1 || imu_history_depth > 1024)
+    throw std::invalid_argument("imu_history_depth must be within [1, 1024]");
+  if (!_node->has_parameter("imu_input_diagnostics"))
+    _node->declare_parameter<bool>("imu_input_diagnostics", false);
+  imu_input_diagnostics = _node->get_parameter("imu_input_diagnostics").as_bool();
+  auto imu_qos = rclcpp::SensorDataQoS();
+  imu_qos.keep_last(static_cast<size_t>(imu_history_depth));
+  sub_imu = _node->create_subscription<sensor_msgs::msg::Imu>(topic_imu, imu_qos,
                                                               std::bind(&ROS2Visualizer::callback_inertial, this, std::placeholders::_1));
   PRINT_INFO("subscribing to IMU: %s\n", topic_imu.c_str());
 
@@ -437,25 +477,74 @@ void ROS2Visualizer::visualize_final() {
 
 void ROS2Visualizer::callback_inertial(const sensor_msgs::msg::Imu::SharedPtr msg) {
 
+  const auto callback_start = imu_input_diagnostics ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+
   // convert into correct format
   ov_core::ImuData message;
   message.timestamp = msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9;
+  // feed/odometry以外の更新thread生成・joinを含む総時間も監視する。
+  CallbackWallTimer callback_timer(imu_input_diagnostics, "imu", message.timestamp);
+  // feed前のheader間隔が40 ms超、または逆行した場合だけ出力する。
+  // 全サンプルの同期ファイル書込みを避け、受信欠測と後段buffer削除の切り分けに使う。
+  if (imu_input_diagnostics && previous_imu_input_stamp >= 0.0) {
+    const double interval = message.timestamp - previous_imu_input_stamp;
+    const double callback_gap_ms = std::chrono::duration<double, std::milli>(callback_start - previous_imu_callback_start).count();
+    // 履歴が欠測を吸収できた場合も、callback未実行の停滞は見えるようにする。
+    // header連続・開始間隔だけ長いケースをセンサ欠測とは別の警告で記録する。
+    if (callback_gap_ms > 40.0 && interval > 0.0 && interval <= 0.040)
+      PRINT_WARNING("[IMU_CALLBACK_DELAY] callback_gap_ms=%.3f header_delta_ms=%.3f previous_feed_ms=%.3f previous_odometry_ms=%.3f stamp=%.9f\n",
+                    callback_gap_ms, interval * 1000.0, previous_imu_feed_ms, previous_imu_odometry_ms, message.timestamp);
+    if (interval > 0.040 || interval <= 0.0) {
+      PRINT_WARNING("[IMU_INPUT_GAP] previous=%.9f current=%.9f delta=%.9f receipt=%.9f\n",
+                    previous_imu_input_stamp, message.timestamp, interval, _node->now().seconds());
+      PRINT_WARNING("[IMU_GAP_CONTEXT] callback_gap_ms=%.3f previous_feed_ms=%.3f previous_odometry_ms=%.3f\n",
+                    callback_gap_ms, previous_imu_feed_ms, previous_imu_odometry_ms);
+    }
+  }
+  if (imu_input_diagnostics)
+    previous_imu_callback_start = callback_start;
+  previous_imu_input_stamp = message.timestamp;
   message.wm << msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z;
   message.am << msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z;
 
   // send it to our VIO system
+  // 欠測警告のconsole出力時間をfeed処理の測定値へ混ぜない。
+  const auto feed_start = imu_input_diagnostics ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
   _app->feed_measurement_imu(message);
+  const auto feed_end = imu_input_diagnostics ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
   visualize_odometry(message.timestamp);
+  // buffer待ちを含むfeedと、propagation／RELIABLE publishの時間を分ける。
+  // wall時間はCPU計算以外にOS・DDS待ちも含むため、CPU不足と断定しない。
+  if (imu_input_diagnostics) {
+    previous_imu_feed_ms = std::chrono::duration<double, std::milli>(feed_end - feed_start).count();
+    previous_imu_odometry_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - feed_end).count();
+    if (previous_imu_feed_ms > 20.0 || previous_imu_odometry_ms > 20.0)
+      PRINT_WARNING("[VIO_IMU_CALLBACK_SLOW] feed_ms=%.3f odometry_ms=%.3f stamp=%.9f\n",
+                    previous_imu_feed_ms, previous_imu_odometry_ms, message.timestamp);
+  }
 
   // If the processing queue is currently active / running just return so we can keep getting measurements
   // Otherwise create a second thread to do our update in an async manor
   // The visualization of the state, images, and features will be synchronous with the update!
   if (thread_update_running)
     return;
-  thread_update_running = true;
-  std::thread thread([&] {
-    // Lock on the queue (prevents new images from appending)
+  {
+    // IMUは約125 Hz、画像は約20 Hz。空queueでも毎回threadを作ると、更新を
+    // 一切しないthreadの生成・終了が受信側のCPU/scheduling余裕を消費する。
+    // queueと起動flagを同じmutexで確認し、観測がある場合だけworkerを予約する。
+    // IMUのfeed・高レートodom公開は上で済んでおり、このreturnで入力は捨てない。
     std::lock_guard<std::mutex> lck(camera_queue_mtx);
+    if (thread_update_running || camera_queue.empty())
+      return;
+    thread_update_running = true;
+  }
+  // callback内のmessageは復帰時に破棄される。detach後も使う時刻だけ値で所有し、
+  // 未受信の未来画像を処理しないためのIMU到達時刻をthread生成時点で固定する。
+  const double imu_update_timestamp = message.timestamp;
+  std::thread thread([this, imu_update_timestamp] {
+    // queueの検査・取り出しだけを保護する。重いVIO更新中もロックを保持すると、
+    // 画像callbackが投入待ちになり、同じcallback groupのIMU受信まで止まり得る。
+    std::unique_lock<std::mutex> lck(camera_queue_mtx);
 
     // Count how many unique image streams
     std::map<int, bool> unique_cam_ids;
@@ -471,16 +560,22 @@ void ROS2Visualizer::callback_inertial(const sensor_msgs::msg::Imu::SharedPtr ms
 
       // Loop through our queue and see if we are able to process any of our camera measurements
       // We are able to process if we have at least one IMU measurement greater than the camera time
-      double timestamp_imu_inC = message.timestamp - _app->get_state()->_calib_dt_CAMtoIMU->value()(0);
+      double timestamp_imu_inC = imu_update_timestamp - _app->get_state()->_calib_dt_CAMtoIMU->value()(0);
       while (!camera_queue.empty() && camera_queue.at(0).timestamp < timestamp_imu_inC) {
         auto rT0_1 = boost::posix_time::microsec_clock::local_time();
         double update_dt = 100.0 * (timestamp_imu_inC - camera_queue.at(0).timestamp);
-        _app->feed_measurement_camera(camera_queue.at(0));
-        visualize();
+        // cv::Matを含む観測をローカルに所有してからqueueを解放する。
+        // 更新threadは従来どおり1本なので、推定器のcamera更新は直列のまま。
+        const auto camera_message = camera_queue.front();
         camera_queue.pop_front();
+        lck.unlock();
+        _app->feed_measurement_camera(camera_message);
+        visualize();
         auto rT0_2 = boost::posix_time::microsec_clock::local_time();
         double time_total = (rT0_2 - rT0_1).total_microseconds() * 1e-6;
         PRINT_INFO(BLUE "[TIME]: %.4f seconds total (%.1f hz, %.2f ms behind)\n" RESET, time_total, 1.0 / time_total, update_dt);
+        // 新しく到着した画像を含め、時刻順queueを再検査する前にロックし直す。
+        lck.lock();
       }
     }
     thread_update_running = false;
@@ -496,6 +591,8 @@ void ROS2Visualizer::callback_inertial(const sensor_msgs::msg::Imu::SharedPtr ms
 }
 
 void ROS2Visualizer::callback_monocular(const sensor_msgs::msg::Image::SharedPtr msg0, int cam_id0) {
+
+  CallbackWallTimer callback_timer(imu_input_diagnostics, "mono", msg0->header.stamp.sec + msg0->header.stamp.nanosec * 1e-9);
 
   // frontend追跡への投入を制限する。track_frequencyは最大処理周波数であり、全ROS画像
   // callbackを使うという意味ではない。ROS header timestampを比較するため、同じsensor
@@ -531,13 +628,23 @@ void ROS2Visualizer::callback_monocular(const sensor_msgs::msg::Image::SharedPtr
   }
 
   // append it to our queue of images
+  const auto queue_wait_start = std::chrono::steady_clock::now();
   std::lock_guard<std::mutex> lck(camera_queue_mtx);
+  // 同じcallback groupのIMU処理まで停滞する仮説を、queue投入待ちの実測で調べる。
+  // 40 ms超だけ出力し、通常の処理順序・ロック範囲は比較時点では変えない。
+  if (imu_input_diagnostics) {
+    const double wait_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - queue_wait_start).count();
+    if (wait_ms > 40.0)
+      PRINT_WARNING("[CAMERA_QUEUE_WAIT] kind=mono wait_ms=%.3f stamp=%.9f\n", wait_ms, message.timestamp);
+  }
   camera_queue.push_back(message);
   std::sort(camera_queue.begin(), camera_queue.end());
 }
 
 void ROS2Visualizer::callback_stereo(const sensor_msgs::msg::Image::ConstSharedPtr msg0, const sensor_msgs::msg::Image::ConstSharedPtr msg1,
                                      int cam_id0, int cam_id1) {
+
+  CallbackWallTimer callback_timer(imu_input_diagnostics, "stereo", msg0->header.stamp.sec + msg0->header.stamp.nanosec * 1e-9);
 
   // stereo pairを一体として扱う。どちらも変換する前にleft画像timestampで判定する。
   // 片側だけを捨てると、同期stereo観測を誤ったmonocular更新へ変えてしまう。
@@ -587,7 +694,13 @@ void ROS2Visualizer::callback_stereo(const sensor_msgs::msg::Image::ConstSharedP
   }
 
   // append it to our queue of images
+  const auto queue_wait_start = std::chrono::steady_clock::now();
   std::lock_guard<std::mutex> lck(camera_queue_mtx);
+  if (imu_input_diagnostics) {
+    const double wait_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - queue_wait_start).count();
+    if (wait_ms > 40.0)
+      PRINT_WARNING("[CAMERA_QUEUE_WAIT] kind=stereo wait_ms=%.3f stamp=%.9f\n", wait_ms, message.timestamp);
+  }
   camera_queue.push_back(message);
   std::sort(camera_queue.begin(), camera_queue.end());
 }

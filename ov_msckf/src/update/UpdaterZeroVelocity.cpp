@@ -26,6 +26,7 @@
 #include "feat/FeatureDatabase.h"
 #include "feat/FeatureHelper.h"
 #include "state/Propagator.h"
+#include "state/ImuIntervalCheck.h"
 #include "state/State.h"
 #include "state/StateHelper.h"
 #include "utils/colors.h"
@@ -107,13 +108,15 @@ bool UpdaterZeroVelocity::try_update(std::shared_ptr<State> state, double timest
     imu_recent = Propagator::select_imu_readings(imu_data, time0, time1);
   }
 
-  // Move forward in time
-  last_prop_time_offset = t_off_new;
-
-  // Check that we have at least one measurement to propagate with
-  if (imu_recent.size() < 2) {
-    PRINT_WARNING(RED "[ZUPT]: There are no IMU data to check for zero velocity with!!\n" RESET);
+  // 2件以上あるだけでは十分ではない。開始端点が欠けた短い系列でZUPTを受理すると、
+  // 状態時刻だけ先へ進み、cleanupが通常propagationに必要な過去IMUを消してしまう。
+  // 視差による静止判定より先に両端を検査し、不足時は状態・共分散を変更しない。
+  if (!has_complete_imu_interval(imu_recent, time0, time1)) {
+    PRINT_WARNING("[ZUPT_IMU_INTERVAL_REJECT] time0=%.9f time1=%.9f count=%zu first=%.9f last=%.9f\n",
+                  time0, time1, imu_recent.size(), imu_recent.empty() ? 0.0 : imu_recent.front().timestamp,
+                  imu_recent.empty() ? 0.0 : imu_recent.back().timestamp);
     last_zupt_state_timestamp = 0.0;
+    last_zupt_count = 0;
     return false;
   }
 
@@ -335,6 +338,9 @@ bool UpdaterZeroVelocity::try_update(std::shared_ptr<State> state, double timest
   }
 
   // Finally return
+  // 不受理時にoffsetだけ進めると、次の要求区間が未更新の状態時刻と整合しなくなる。
+  // 今回ZUPTを受理して状態を更新できたときだけ、対応するoffsetを確定する。
+  last_prop_time_offset = t_off_new;
   last_zupt_state_timestamp = timestamp;
   last_zupt_count++;
   return true;

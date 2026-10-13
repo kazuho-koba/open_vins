@@ -57,6 +57,10 @@ public:
     _gravity << 0.0, 0.0, gravity_mag;
   }
 
+  /// 開始側IMUを既に失った場合の非復帰ラッチ。新しいVioManagerによる再初期化が必要。
+  /// 画像更新threadが設定し、IMU callbackも読むためatomicで公開する。
+  bool imu_interval_reset_required() const { return imu_interval_reset_required_.load(); }
+
   /**
    * @brief Stores incoming inertial readings
    * @param message Contains our timestamp and inertial information
@@ -85,6 +89,7 @@ public:
   }
 
 private:
+  std::atomic<bool> imu_interval_reset_required_{false};
   // 呼出元がimu_data_mtxを保持すること。閾値・保持期間は従来と同じ。
   void clean_old_imu_measurements_locked(double oldest_time, const char *source) {
     if (oldest_time < 0)

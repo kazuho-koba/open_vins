@@ -9,6 +9,8 @@ import shlex
 import sys
 
 launch_args = [
+    DeclareLaunchArgument(name="imu_history_depth", default_value="5", description="IMU購読履歴の件数（BEST_EFFORTを維持）"),
+    DeclareLaunchArgument(name="imu_input_diagnostics", default_value="false", description="受信IMUの40 ms超のstamp欠測を記録"),
     DeclareLaunchArgument(name="namespace", default_value="ov_msckf", description="namespace"),
     DeclareLaunchArgument(
         name="ov_enable", default_value="true", description="enable OpenVINS node"
@@ -123,6 +125,8 @@ def launch_setup(context):
         output='screen',
         prefix=console_prefix,
         parameters=[
+            {"imu_history_depth": int(LaunchConfiguration("imu_history_depth").perform(context))},
+            {"imu_input_diagnostics": LaunchConfiguration("imu_input_diagnostics")},
             {"verbosity": LaunchConfiguration("verbosity")},
             {"use_stereo": LaunchConfiguration("use_stereo")},
             {"max_cameras": LaunchConfiguration("max_cameras")},
