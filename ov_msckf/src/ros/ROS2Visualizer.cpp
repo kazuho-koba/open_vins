@@ -22,6 +22,8 @@
 #include "ROS2Visualizer.h"
 #include <stdexcept>
 #include <chrono>
+#include <iomanip>
+#include <sstream>
 
 #include "core/VioManager.h"
 #include "ros/ROSVisualizerHelper.h"
@@ -174,17 +176,79 @@ ROS2Visualizer::ROS2Visualizer(std::shared_ptr<rclcpp::Node> node, std::shared_p
     }
   }
 
+  // 低容量の状態診断は常時有効。volatileのbag購読でも1秒以内に現状態を記録できる。
+  // transient-localは後から参加する監視subscriberにも最後の状態を供給する。
+  pub_health = _node->create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
+      "diagnostics/health", rclcpp::QoS(10).reliable().transient_local());
+  publish_health(true);
+  health_timer = _node->create_wall_timer(std::chrono::seconds(1), [this] { publish_health(true); });
+
   // Start thread for the image publishing
   if (_app->get_params().use_multi_threading_pubs) {
-    std::thread thread([&] {
+    image_worker = std::thread([this] {
       rclcpp::Rate loop_rate(20);
-      while (rclcpp::ok()) {
+      while (!workers_stopping && rclcpp::ok()) {
         publish_images();
         loop_rate.sleep();
       }
     });
-    thread.detach();
   }
+}
+
+ROS2Visualizer::~ROS2Visualizer() { stop_workers(); }
+
+void ROS2Visualizer::stop_workers() {
+  // executorがcallbackを終えた後の終了専用処理。通常の推定順序やqueueは変更しない。
+  // 更新中の最後の観測は完了させ、publisherと状態ファイルが生存している間にjoinする。
+  workers_stopping = true;
+  if (health_timer)
+    health_timer->cancel();
+  if (update_worker.joinable())
+    update_worker.join();
+  if (image_worker.joinable())
+    image_worker.join();
+}
+
+void ROS2Visualizer::publish_health(bool heartbeat) {
+  // callbackと画像workerから同時に通知しても、状態遷移・最初の検出時刻を一度だけ記録する。
+  std::lock_guard<std::mutex> lock(health_publish_mtx);
+  const auto evidence = _app->get_propagator()->reset_evidence();
+  const std::string state = evidence.required ? "reset_required" :
+      (health_initialized.load() ? "running" : "initializing");
+  if (!heartbeat && state == health_last_state)
+    return;
+  diagnostic_msgs::msg::DiagnosticArray message;
+  message.header.stamp = _node->now();
+  diagnostic_msgs::msg::DiagnosticStatus status;
+  status.name = "OpenVINS/health";
+  status.hardware_id = _node->get_fully_qualified_name();
+  status.level = evidence.required ? diagnostic_msgs::msg::DiagnosticStatus::ERROR :
+      (state == "running" ? diagnostic_msgs::msg::DiagnosticStatus::OK : diagnostic_msgs::msg::DiagnosticStatus::WARN);
+  status.message = state;
+  auto add = [&status](const std::string &key, const std::string &value) {
+    diagnostic_msgs::msg::KeyValue item;
+    item.key = key; item.value = value; status.values.push_back(item);
+  };
+  auto seconds = [](double value) {
+    std::ostringstream out; out << std::setprecision(17) << value; return out.str();
+  };
+  if (evidence.required && health_last_state != "reset_required")
+    health_reset_detection_stamp = _node->now().seconds();
+  add("state", state);
+  add("initialized", health_initialized.load() ? "true" : "false");
+  add("reset_required", evidence.required ? "true" : "false");
+  add("reason", evidence.required ? "imu_interval_start_lost" : "none");
+  // detectionはROS時計、以下のIMU端点はsensor時計。両者の意味を混同しない。
+  add("reset_detection_ros_stamp_s", seconds(health_reset_detection_stamp));
+  add("last_received_imu_sensor_stamp_s", seconds(health_last_imu_stamp.load()));
+  add("required_start_imu_stamp_s", seconds(evidence.required_start));
+  add("required_end_imu_stamp_s", seconds(evidence.required_end));
+  add("buffer_first_imu_stamp_s", seconds(evidence.buffer_first));
+  add("buffer_last_imu_stamp_s", seconds(evidence.buffer_last));
+  add("buffer_count", std::to_string(evidence.buffer_count));
+  message.status.push_back(status);
+  pub_health->publish(message);
+  health_last_state = state;
 }
 
 void ROS2Visualizer::setup_subscribers(std::shared_ptr<ov_core::YamlParser> parser) {
@@ -482,6 +546,7 @@ void ROS2Visualizer::callback_inertial(const sensor_msgs::msg::Imu::SharedPtr ms
   // convert into correct format
   ov_core::ImuData message;
   message.timestamp = msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9;
+  health_last_imu_stamp.store(message.timestamp);
   // feed/odometry以外の更新thread生成・joinを含む総時間も監視する。
   CallbackWallTimer callback_timer(imu_input_diagnostics, "imu", message.timestamp);
   // feed前のheader間隔が40 ms超、または逆行した場合だけ出力する。
@@ -538,10 +603,14 @@ void ROS2Visualizer::callback_inertial(const sensor_msgs::msg::Imu::SharedPtr ms
       return;
     thread_update_running = true;
   }
-  // callback内のmessageは復帰時に破棄される。detach後も使う時刻だけ値で所有し、
+  // 終了済みworkerもjoin可能なまま残る。次のworkerを代入する前に回収する。
+  // running=falseを確認した後なので、通常時の待機は終了直前の後処理だけになる。
+  if (update_worker.joinable())
+    update_worker.join();
+  // callback内のmessageは復帰時に破棄される。復帰後も使う時刻だけ値で所有し、
   // 未受信の未来画像を処理しないためのIMU到達時刻をthread生成時点で固定する。
   const double imu_update_timestamp = message.timestamp;
-  std::thread thread([this, imu_update_timestamp] {
+  update_worker = std::thread([this, imu_update_timestamp] {
     // queueの検査・取り出しだけを保護する。重いVIO更新中もロックを保持すると、
     // 画像callbackが投入待ちになり、同じcallback groupのIMU受信まで止まり得る。
     std::unique_lock<std::mutex> lck(camera_queue_mtx);
@@ -570,6 +639,9 @@ void ROS2Visualizer::callback_inertial(const sensor_msgs::msg::Imu::SharedPtr ms
         camera_queue.pop_front();
         lck.unlock();
         _app->feed_measurement_camera(camera_message);
+        // 推定器を扱う既存workerだけで初期化状態を読み、timerへatomic snapshotで渡す。
+        health_initialized.store(_app->initialized());
+        publish_health();
         visualize();
         auto rT0_2 = boost::posix_time::microsec_clock::local_time();
         double time_total = (rT0_2 - rT0_1).total_microseconds() * 1e-6;
@@ -581,12 +653,9 @@ void ROS2Visualizer::callback_inertial(const sensor_msgs::msg::Imu::SharedPtr ms
     thread_update_running = false;
   });
 
-  // If we are single threaded, then run single threaded
-  // Otherwise detach this thread so it runs in the background!
+  // 同期モードは従来どおり待つ。非同期モードでは所有を保持し、次回または終了時に回収する。
   if (!_app->get_params().use_multi_threading_subs) {
-    thread.join();
-  } else {
-    thread.detach();
+    update_worker.join();
   }
 }
 

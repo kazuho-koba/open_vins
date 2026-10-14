@@ -61,6 +61,17 @@ public:
   /// 画像更新threadが設定し、IMU callbackも読むためatomicで公開する。
   bool imu_interval_reset_required() const { return imu_interval_reset_required_.load(); }
 
+  /// 停止判定時のIMU時計[s]の証拠。生bufferを後から読むと削除・到着で変わるため固定する。
+  struct ResetEvidence {
+    bool required = false;
+    double required_start = 0, required_end = 0, buffer_first = 0, buffer_last = 0;
+    size_t buffer_count = 0;
+  };
+  ResetEvidence reset_evidence() const {
+    std::lock_guard<std::mutex> lock(reset_evidence_mtx);
+    return reset_evidence_;
+  }
+
   /**
    * @brief Stores incoming inertial readings
    * @param message Contains our timestamp and inertial information
@@ -90,6 +101,8 @@ public:
 
 private:
   std::atomic<bool> imu_interval_reset_required_{false};
+  mutable std::mutex reset_evidence_mtx;
+  ResetEvidence reset_evidence_;
   // 呼出元がimu_data_mtxを保持すること。閾値・保持期間は従来と同じ。
   void clean_old_imu_measurements_locked(double oldest_time, const char *source) {
     if (oldest_time < 0)

@@ -46,10 +46,12 @@
 #include <tf2_ros/transform_broadcaster.h>
 
 #include <atomic>
+#include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <chrono>
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <thread>
 
 #include <Eigen/Eigen>
 #include <boost/date_time/posix_time/posix_time.hpp>
@@ -86,6 +88,14 @@ public:
    * @param sim Simulator if we are simulating
    */
   ROS2Visualizer(std::shared_ptr<rclcpp::Node> node, std::shared_ptr<VioManager> app, std::shared_ptr<Simulator> sim = nullptr);
+
+  ~ROS2Visualizer();
+
+  /// executor停止後に呼ぶ。新規callbackのない状態でworkerを回収してからROS資源を破棄する。
+  void stop_workers();
+
+  /// 状態変化時と1 Hz heartbeat用。thread-safeな診断snapshotだけを参照する。
+  void publish_health(bool heartbeat = false);
 
   /**
    * @brief Will setup ROS subscribers and callbacks
@@ -189,6 +199,18 @@ protected:
 
   // Thread atomics
   std::atomic<bool> thread_update_running;
+  // detachせず所有し、thisやpublisherの破棄後にthreadがアクセスすることを防ぐ。
+  // update_workerの操作は従来の排他IMU callback内、終了時はexecutor停止後だけ行う。
+  std::thread update_worker;
+  std::thread image_worker;
+  std::atomic<bool> workers_stopping{false};
+  rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr pub_health;
+  rclcpp::TimerBase::SharedPtr health_timer;
+  std::atomic<bool> health_initialized{false};
+  std::atomic<double> health_last_imu_stamp{0};
+  std::mutex health_publish_mtx;
+  std::string health_last_state;
+  double health_reset_detection_stamp = 0;
 
   /// Queue up camera measurements sorted by time and trigger once we have
   /// exactly one IMU measurement with timestamp newer than the camera measurement

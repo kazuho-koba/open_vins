@@ -90,6 +90,11 @@ void Propagator::propagate_and_clone(std::shared_ptr<State> state, double timest
     // 受信と画像更新を止めるラッチを立て、停止状態のままbufferを無限に蓄積させない。
     // 自動リセットは相対座標の飛びを伴うため、ここでは明示的な再起動を要求する。
     if (buffer_count > 0 && buffer_first > time0 + 1e-6) {
+      {
+        // 証拠を先に確定する。診断timerは推定状態やIMU bufferを直接参照しない。
+        std::lock_guard<std::mutex> lock(reset_evidence_mtx);
+        reset_evidence_ = {true, time0, time1, buffer_first, buffer_last, buffer_count};
+      }
       imu_interval_reset_required_.store(true);
       PRINT_ERROR("[VIO_IMU_RESET_REQUIRED] required_start=%.9f buffer_first=%.9f; restart VIO before reuse\n",
                   time0, buffer_first);

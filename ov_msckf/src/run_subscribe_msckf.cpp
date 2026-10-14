@@ -113,7 +113,19 @@ int main(int argc, char **argv) {
 #endif
 
   // Final visualization
+#if ROS_AVAILABLE == 2
+  // spinから戻った後はcallbackが終了済み。detachしていたworkerも回収し、
+  // 最終校正の表示とROS publisherの破棄が推定更新と競合しないようにする。
+  viz->stop_workers();
+#endif
   viz->visualize_final();
+#if ROS_AVAILABLE == 2
+  // グローバルshared_ptrをexit時まで残すとDDSの静的資源との破棄順序に依存する。
+  // main内でpublisher/subscriber/状態ファイルを破棄してから終了する。
+  executor.remove_node(node);
+  viz.reset();
+  sys.reset();
+#endif
 #if ROS_AVAILABLE == 1
   ros::shutdown();
 #elif ROS_AVAILABLE == 2

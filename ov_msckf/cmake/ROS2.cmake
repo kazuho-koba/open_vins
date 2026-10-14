@@ -9,6 +9,7 @@ find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(diagnostic_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
 find_package(ov_core REQUIRED)
@@ -43,6 +44,7 @@ list(APPEND ament_libraries
         geometry_msgs
         sensor_msgs
         nav_msgs
+        diagnostic_msgs
         cv_bridge
         image_transport
         ov_core
@@ -109,6 +111,10 @@ target_link_libraries(test_sim_repeat ov_msckf_lib ${thirdparty_libraries})
 install(TARGETS test_sim_repeat DESTINATION lib/${PROJECT_NAME})
 
 # Install launch and config directories
+add_executable(test_vio_health src/test/test_vio_health.cpp)
+ament_target_dependencies(test_vio_health ${ament_libraries})
+target_link_libraries(test_vio_health ov_msckf_lib ${thirdparty_libraries})
+
 install(DIRECTORY launch/ DESTINATION share/${PROJECT_NAME}/launch/)
 install(DIRECTORY ../config/ DESTINATION share/${PROJECT_NAME}/config/)
 

@@ -3,7 +3,38 @@
 この文書はPatasmonkeyのOAK-D S2を入力にしたOpenVINS検証のための補足です。
 upstreamのOpenVINS一般説明は[ReadMe.md](ReadMe.md)を参照してください。
 
-## 使用設定
+## 軽量な健全性診断の記録
+
+ROS 2購読ノードは `diagnostics/health`（通常のnamespaceでは
+`/ov_msckf/diagnostics/health`）をDiagnosticArrayで常時publishします。
+状態変化時は即時、wall timerによるheartbeatは1 Hzです。QoSはRELIABLE／
+TRANSIENT_LOCAL／深さ10で、mission bagにも常時含めます。
+`initializing`はWARN、`running`はOK、`reset_required`はERRORです。
+runningは「初期化済み」を意味し、出力の新鮮さや推定精度の保証ではありません。
+ノード・executor自体が固まる場合は診断も途切れるため、出力鮮度の監視は別途必要です。
+
+停止証拠は判定時点のIMU区間・buffer端点・件数を小さなsnapshotに固定します。
+時刻の単位は秒で、`reset_detection_ros_stamp_s`のみ診断側ROS時計、
+`required_*_imu_stamp_s`、`buffer_*_imu_stamp_s`、`last_received_imu_sensor_stamp_s`は
+IMUのsensor時計です。reset_requiredは再起動まで保持され、自動リセットはしません。
+timerは推定状態や生IMU bufferを読まず、mutexでコピーした停止証拠とatomic cacheを読みます。
+画像・IMUの追加購読や高レート診断は行いません。
+
+`test_vio_health`は実機を開かずに保護条件と診断配信を検証するfixtureです。
+running表示だけはcacheへ注入し、停止判定は実Propagatorへ開始側IMU不足を与えて確認します。
+真の画像・IMUによる初期化試験とは区別してください。
+
+## ROS 2購読ノードの終了処理（詳細）
+
+`run_subscribe_msckf`はexecutor停止後に画像更新・画像publish workerをjoinし、
+最終校正を表示してからVisualizerをmain内で明示的に破棄します。
+グローバルshared_ptrのexit時破棄にROS publisherを残すと、Foxy/Fast DDSの
+終了資源との破棄順序が問題となり、SIGINT後にSIGSEGVが発生していました。
+workerの所有を保持するため通常時も完了済みthreadを次の起動前にjoinしますが、
+画像更新の直列性・センサtimestamp・QoS・callbackグループは変更しません。
+`stop_workers()`を使う場合はexecutorを先に止め、新規callbackのない状態で呼びます。
+
+## 使用設定（校正）
 
 Patasmonkey launchは`pm_config/config/oak_d_s2/estimator_config1.yaml`を使います。camera–IMU
 校正は、接続したOAKのMX IDに対応するYAMLを`pm_config`から指定します。別個体の
